@@ -55,12 +55,13 @@ class AuthService:
         self._user_profiles: dict[str, dict[str, Any]] = {}
 
     def _create_endpoints(self, cookies: list[dict[str, Any]] | None = None) -> BrainEndpoints:
+        base_client = self.endpoints.client
         client = BrainClient(
-            self.endpoints.client.base_url,
-            min_retry_after=self.endpoints.client.throttle.min_retry_after,
-            poll_timeout=self.endpoints.client.poll_timeout,
-            min_request_interval=self.endpoints.client.throttle.min_interval,
-            default_attempts=self.endpoints.client.default_attempts,
+            base_client.base_url,
+            min_retry_after=base_client.min_retry_after,
+            poll_timeout=base_client.poll_timeout,
+            min_request_interval=base_client.throttle.min_interval,
+            default_attempts=base_client.default_attempts,
         )
         if cookies:
             client.load_cookies(cookies)

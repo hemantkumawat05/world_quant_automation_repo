@@ -182,6 +182,18 @@ class BrainClient:
         )
         self.last_rate_limit: RateLimit | None = None
 
+    @property
+    def min_retry_after(self) -> float:
+        return self._min_retry_after
+
+    @property
+    def poll_timeout(self) -> float:
+        return self._poll_timeout
+
+    @property
+    def default_attempts(self) -> int:
+        return self._default_attempts
+
     # -- lifecycle -------------------------------------------------------
 
     async def __aenter__(self) -> Self:
