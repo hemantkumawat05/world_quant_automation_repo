@@ -86,7 +86,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=settings.cors_origins if "*" not in settings.cors_origins else None,
+        allow_origin_regex=r"https?://.*",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -121,6 +122,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(chat.router)
     app.include_router(ws.router)
 
+    @app.get("/", tags=["meta"])
+    @app.get("/health", tags=["meta"])
     @app.get("/api/health", tags=["meta"])
     async def health() -> dict[str, Any]:
         """Liveness plus a summary of local state, for the UI's status bar."""
