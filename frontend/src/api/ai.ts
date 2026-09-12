@@ -3,6 +3,7 @@
  * is shown, and the chat. Bodies are snake_case only. Keys never come back — only `hint`.
  */
 
+
 import { fmt } from '@/lib/format'
 import { ApiError, http, qs } from './http'
 import type { LLMUsage, Scope, ScopeBody } from './types'
