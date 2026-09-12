@@ -4,9 +4,10 @@ A local app for generating Alphas on [WorldQuant BRAIN](https://platform.worldqu
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/) 0.12 or newer (installs Python 3.14 for you)
+- [Python](https://www.python.org/) 3.14 or newer
+- [uv](https://docs.astral.sh/uv/) 0.12 or newer (`python -m pip install uv`)
 - [Node.js](https://nodejs.org) 22.12 or newer
-- [pnpm](https://pnpm.io) 12 or newer
+- [pnpm](https://pnpm.io) 12 or newer (`npm install -g pnpm`)
 
 ## Setup
 
@@ -14,30 +15,57 @@ A local app for generating Alphas on [WorldQuant BRAIN](https://platform.worldqu
 git clone <repo-url> alpha-harness
 cd alpha-harness
 
-cd backend && uv sync
+# Install backend dependencies
+cd backend && python -m uv sync
+
+# Install frontend dependencies
 cd ../frontend && pnpm install
 ```
 
-## Run
+## Quick Start (Windows)
 
-Start the backend and the frontend in two terminals:
+You can launch both the backend and frontend at once using:
+
+- Double-click **`start-all.bat`** (or run `.\start-all.bat` in PowerShell/Command Prompt)
+
+Or run them individually:
+- Backend: `.\start-backend.bat`
+- Frontend: `.\start-frontend.bat`
+
+## Run (Manual)
+
+Start the backend and frontend in two separate terminals:
 
 ```bash
-# Terminal 1
-cd backend && uv run uvicorn alpha_harness.main:app --port 8000
+# Terminal 1 - Backend
+cd backend
+python -m uv run uvicorn alpha_harness.main:app --port 8000 --reload
 ```
 
 ```bash
-# Terminal 2
-cd frontend && pnpm dev
+# Terminal 2 - Frontend
+cd frontend
+pnpm dev
 ```
 
 Open http://localhost:5173 and sign in with your BRAIN account.
 
-## Local data
+## Local Data
 
-Your login, API keys, simulations and synced data are stored in `~/.alpha-harness/`. To use another folder, create a `.env` file in the repository root:
+Your login, API keys, simulations, and synced catalog data are stored in `~/.alpha-harness/`. To use another folder, create a `.env` file in the repository root:
 
 ```bash
 AH_DATA_DIR=/path/to/folder
 ```
+
+
+
+
+
+
+
+
+
+
+pnpm dev
+python -m uv run uvicorn alpha_harness.main:app --port 8000 --reload
