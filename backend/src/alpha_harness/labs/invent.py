@@ -426,7 +426,7 @@ def _failures(checks_json: Any) -> int:
         return 0
     try:
         checks = json.loads(checks_json)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return 0
     if not isinstance(checks, list):
         return 0

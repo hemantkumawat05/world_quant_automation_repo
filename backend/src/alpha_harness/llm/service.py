@@ -462,7 +462,7 @@ def _parse_alphas(text: str) -> list[dict[str, Any]]:
     for candidate in (text, *(m.group(1) for m in FENCE.finditer(text))):
         try:
             payload = json.loads(candidate)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(payload, dict) and isinstance(payload.get("alphas"), list):
             return [a for a in payload["alphas"] if isinstance(a, dict) and a.get("expression")]

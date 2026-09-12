@@ -53,7 +53,7 @@ def _number(value: Any, digits: int = 2) -> str:
         return "-"
     try:
         number = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return str(value)
     if number.is_integer():
         return str(int(number))

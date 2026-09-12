@@ -112,7 +112,7 @@ def judged_results(checks_json: str | None) -> list[str] | None:
         return None
     try:
         checks = json.loads(checks_json)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return None
     if not isinstance(checks, list) or not checks:
         return None
@@ -394,7 +394,7 @@ def failed_checks(checks_json: str | None) -> set[str]:
         return set()
     try:
         checks = json.loads(checks_json)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return set()
     if not isinstance(checks, list):
         return set()

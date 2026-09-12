@@ -56,7 +56,7 @@ def loads_or(text: str, **default: Any) -> dict[str, Any]:
     """
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return default
     return payload if isinstance(payload, dict) else default
 

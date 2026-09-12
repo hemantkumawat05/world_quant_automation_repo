@@ -135,7 +135,7 @@ def resolve(choice: dict[str, Any]) -> Combination | None:
     """
     try:
         depth = int(choice.get("depth", 0))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     if depth not in DEPTHS:
         return None
