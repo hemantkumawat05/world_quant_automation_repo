@@ -84,28 +84,83 @@ async def today(
     instrument_type: str = "EQUITY",
 ) -> dict[str, Any]:
     """Everything the first screen needs, in one call."""
-    if user and user.session.authenticated:
-        session = user.session
-        stored_email = user.email or await state.auth.stored_email(user_id=user.user_id)
-        keys = await state.llm.keys.list(user_id=user.user_id)
-        enabled_keys = [k for k in keys if k.enabled]
-        step = "ready" if enabled_keys else "add-key"
-        user_id = user.user_id
-    else:
-        session = SessionInfo.anonymous()
-        stored_email = None
-        keys = []
-        enabled_keys = []
-        step = "sign-in"
-        user_id = None
+    try:
+        if user and user.session.authenticated:
+            session = user.session
+            stored_email = user.email or await state.auth.stored_email(user_id=user.user_id)
+            keys = await state.llm.keys.list(user_id=user.user_id)
+            enabled_keys = [k for k in keys if k.enabled]
+            step = "ready" if enabled_keys else "add-key"
+            user_id = user.user_id
+        else:
+            session = SessionInfo.anonymous()
+            stored_email = None
+            keys = []
+            enabled_keys = []
+            step = "sign-in"
+            user_id = None
 
-    return {
-        "step": step,
-        "you": await _you(state, session, stored_email, user_id=user_id),
-        "simulations": await _simulations(state, user_id=user_id),
-        "assistant": await _assistant(state, keys, enabled_keys),
-        "catalog": await _catalog(state, instrument_type, region, delay, universe),
-    }
+        return {
+            "step": step,
+            "you": await _you(state, session, stored_email, user_id=user_id),
+            "simulations": await _simulations(state, user_id=user_id),
+            "assistant": await _assistant(state, keys, enabled_keys),
+            "catalog": await _catalog(state, instrument_type, region, delay, universe),
+        }
+    except Exception as exc:
+        import structlog
+        structlog.get_logger("alpha_harness").exception("today.unhandled_error", error=str(exc))
+        return {
+            "step": "sign-in",
+            "you": {
+                "signedIn": False,
+                "email": None,
+                "userId": None,
+                "fullName": None,
+                "features": [],
+                "canRunTenAtOnce": False,
+                "verificationUrl": None,
+            },
+            "simulations": {
+                "limit": 5000,
+                "used": 0,
+                "remaining": 5000,
+                "pendingCharge": 0,
+                "queued": 0,
+                "unspoken": 5000,
+                "exact": False,
+                "resetsInSeconds": 86400,
+                "resetsAt": "midnight US Eastern",
+                "engine": {
+                    "slots": 8,
+                    "maxBatch": 10,
+                    "slotsUsed": 0,
+                    "slotsFree": 8,
+                    "queued": {},
+                    "queuedTotal": 0,
+                    "inFlight": {},
+                    "quotas": {},
+                    "dailyLimitHit": False,
+                },
+                "headline": "Sign in to start research.",
+            },
+            "assistant": {
+                "keys": 0,
+                "enabledKeys": 0,
+                "requestsRemainingToday": 0,
+                "budget": [],
+                "resetsInSeconds": 86400,
+                "resetsAt": "midnight Pacific",
+                "headline": "No assistant key yet.",
+            },
+            "catalog": {
+                "scope": f"{instrument_type}/{region}/D{delay}/{universe}",
+                "synced": False,
+                "fields": 0,
+                "running": None,
+                "anySynced": False,
+            },
+        }
 
 
 @router.get("/bar")

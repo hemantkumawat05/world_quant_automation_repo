@@ -332,3 +332,16 @@ def install_exception_handlers(app: FastAPI) -> None:
             detail=exc.message,
             platformStatus=exc.status,
         )
+
+    @app.exception_handler(Exception)
+    async def _catch_all(_r: Request, exc: Exception) -> JSONResponse:
+        import traceback
+        import structlog
+        structlog.get_logger("alpha_harness").error("server.unhandled_exception", error=str(exc), stack=traceback.format_exc())
+        return _problem(
+            500,
+            "internal_error",
+            f"Server error: {str(exc)}",
+            detail=traceback.format_exc(),
+        )
+
