@@ -53,6 +53,7 @@ class AuthService:
         self._user_sessions: dict[str, SessionInfo] = {}
         self._user_endpoints: dict[str, BrainEndpoints] = {}
         self._user_profiles: dict[str, dict[str, Any]] = {}
+        self._pending_verifications: dict[str, str] = {}
 
     def _create_endpoints(self, cookies: list[dict[str, Any]] | None = None) -> BrainEndpoints:
         base_client = self.endpoints.client
@@ -251,10 +252,22 @@ class AuthService:
         endpoints = self._create_endpoints()
         authenticator = Authenticator(endpoints)
 
-        pending = self._session.verification_url
-        info = await authenticator.verify(pending, email, password) if pending else None
-        if info is None:
-            info = await authenticator.login(email, password)
+        norm_email = (email or "").strip().lower()
+        pending = self._pending_verifications.get(norm_email) or self._session.verification_url
+        info: SessionInfo | None = None
+        if pending:
+            info = await authenticator.verify(pending, email, password)
+
+        if info is None or not info.authenticated:
+            fresh_info = await authenticator.login(email, password)
+            if fresh_info.authenticated or fresh_info.verification_url or not info:
+                info = fresh_info
+
+        if info.verification_url:
+            self._pending_verifications[norm_email] = info.verification_url
+            self._session = info
+        else:
+            self._pending_verifications.pop(norm_email, None)
 
         token: str | None = None
         if info.authenticated and info.user_id:

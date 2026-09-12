@@ -158,11 +158,13 @@ class Authenticator:
         r = await self.endpoints.client.request(
             "POST", url, auth=(email, password), raise_for_status=False
         )
-        if r.status == 201:
+        if r.status in (200, 201):
             state = await self.endpoints.get_auth()
             if state is not None and state.user_id is not None:
                 log.info("brain.auth.verified", user_id=state.user_id)
                 return SessionInfo.from_state(state)
+            if isinstance(r.body, dict) and (r.body.get("user") or r.body.get("token")):
+                return SessionInfo.from_state(AuthState.model_validate(r.body))
             return None
         error = self.endpoints.client._to_error("POST", url, r) if r.status >= 400 else None
         if isinstance(error, BrainVerificationRequired):
