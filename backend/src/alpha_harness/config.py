@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     # Attempts for retryable failures (429 throttling, 503, transport errors).
     request_attempts: int = 6
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                import json
+                try:
+                    return json.loads(value)
+                except Exception:
+                    pass
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return value  # type: ignore[return-value]
+
     @field_validator("data_dir", mode="after")
     @classmethod
     def _expand(cls, value: Path) -> Path:

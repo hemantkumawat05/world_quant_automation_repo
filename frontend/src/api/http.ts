@@ -82,10 +82,13 @@ export function normalise(status: number, raw: unknown): ApiErrorBody {
   return { code: `http_${status}`, message: describe(status) }
 }
 
+const BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const url = path.startsWith('http') ? path : `${BASE_URL}${path}`
   let response: Response
   try {
-    response = await fetch(path, {
+    response = await fetch(url, {
       method,
       headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),

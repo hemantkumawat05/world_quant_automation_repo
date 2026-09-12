@@ -33,8 +33,24 @@ class Telemetry {
 
   connect(): void {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(`${protocol}//${location.host}/ws`)
+    let wsUrl = import.meta.env.VITE_WS_URL
+    if (!wsUrl) {
+      const apiUrl = import.meta.env.VITE_API_URL
+      if (apiUrl) {
+        try {
+          const parsed = new URL(apiUrl)
+          const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:'
+          wsUrl = `${wsProtocol}//${parsed.host}/ws`
+        } catch {
+          const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+          wsUrl = `${protocol}//${location.host}/ws`
+        }
+      } else {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+        wsUrl = `${protocol}//${location.host}/ws`
+      }
+    }
+    const socket = new WebSocket(wsUrl)
     this.socket = socket
 
     socket.onopen = () => {
