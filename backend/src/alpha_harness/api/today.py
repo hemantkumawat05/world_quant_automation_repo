@@ -194,9 +194,12 @@ async def _catalog(
         None,
     )
 
-    running = next(
-        (r for r in await state.sync.runs(limit=10) if r.status == SyncStatus.RUNNING), None
-    )
+    try:
+        running = next(
+            (r for r in await state.sync.runs(limit=10) if r.status == SyncStatus.RUNNING), None
+        )
+    except Exception:
+        running = None
 
     return {
         "scope": f"{instrument_type}/{region}/D{delay}/{universe}",
@@ -243,8 +246,12 @@ async def _you(
 
 async def _simulations(state: State, user_id: str | None = None) -> dict[str, Any]:
     allowance = state.settings.daily_simulation_allowance
-    used = await state.tracker.used_today(user_id=user_id)
-    snapshot = await state.tracker.latest_quota()
+    try:
+        used = await state.tracker.used_today(user_id=user_id)
+        snapshot = await state.tracker.latest_quota()
+    except Exception:
+        used = 0
+        snapshot = None
 
     exact = False
     pending = 0
@@ -254,11 +261,27 @@ async def _simulations(state: State, user_id: str | None = None) -> dict[str, An
         if observed and _same_platform_day(observed):
             exact = True
             limit = snapshot.limit_total or allowance
-            pending = await state.tracker.uncharged_since(observed, user_id=user_id)
+            try:
+                pending = await state.tracker.uncharged_since(observed, user_id=user_id)
+            except Exception:
+                pending = 0
             remaining = max(0, snapshot.remaining - pending)
 
     resets_in = seconds_until_reset(tz=PLATFORM_TZ)
-    engine = await state.engine.status()
+    try:
+        engine = await state.engine.status()
+    except Exception:
+        engine = {
+            "slots": 8,
+            "maxBatch": 10,
+            "slotsUsed": 0,
+            "slotsFree": 8,
+            "queued": {},
+            "queuedTotal": 0,
+            "inFlight": {},
+            "quotas": {},
+            "dailyLimitHit": False,
+        }
     # Work that is queued has not been sent yet, so it does not show up in ``used`` —
     # but it *is* spoken for, and counting it as waste would tell someone who has just
     # queued their whole day that they have done nothing. That is the opposite of what

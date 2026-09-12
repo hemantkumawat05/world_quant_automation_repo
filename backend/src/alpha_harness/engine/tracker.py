@@ -449,6 +449,9 @@ class SimulationTracker:
                     ),
                 )
             )
+            if user_id:
+                stmt = stmt.where(SimulationRecord.user_id == user_id)
+            total = await session.scalar(stmt)
         return int(total or 0)
 
     async def latest_quota(self) -> QuotaSnapshot | None:
