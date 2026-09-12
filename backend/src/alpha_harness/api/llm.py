@@ -105,19 +105,15 @@ async def run_prompt(body: RunRequest, state: State) -> dict[str, Any]:
 
 
 @router.get("/keys")
-async def list_keys(state: State) -> dict[str, Any]:
+async def list_keys(state: State, user: OptionalUser) -> dict[str, Any]:
     """Keys, today's usage, and how much budget is left across all of them."""
-    return await state.llm.keys.status(state.llm.registry)
+    user_id = user.user_id if user else None
+    return await state.llm.keys.status(state.llm.registry, user_id=user_id)
 
 
 @router.get("/providers")
 async def providers() -> dict[str, Any]:
-    """Every assistant that can answer, and how to get a free key for it.
-
-    All of them are free and need no card. That is the selection rule: the assistant is
-    optional here, and a provider asking for payment details turns an optional
-    convenience into a purchase decision.
-    """
+    """Every assistant that can answer, and how to get a free key for it."""
     from ..llm.providers import catalogue
 
     return catalogue()
@@ -130,13 +126,9 @@ class AddKey(BaseModel):
 
 
 @router.post("/keys", status_code=201)
-async def add_key(body: AddKey, state: State) -> dict[str, Any]:
-    """Store a key.
-
-    Quota is per account, so adding a key from a second account genuinely doubles the
-    daily budget — which is why the same key cannot be added twice.
-    """
-    row = await state.llm.keys.add(body.key, body.label, provider=body.provider)
+async def add_key(body: AddKey, state: State, user: OptionalUser) -> dict[str, Any]:
+    user_id = user.user_id if user else None
+    row = await state.llm.keys.add(body.key, body.label, provider=body.provider, user_id=user_id)
     return serialise(row)
 
 

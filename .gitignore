@@ -18,3 +18,5 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 *.tsbuildinfo
+*.egg-info/
+*.egg

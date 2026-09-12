@@ -161,12 +161,16 @@ class SimulationTracker:
         *,
         task: str = "manual",
         record_id: int | None = None,
+        user_id: str | None = None,
+        endpoints: BrainEndpoints | None = None,
     ) -> SimulationRecord:
         """Start one simulation, recording its id durably. See :meth:`_submit`."""
         if record_id is not None:
             self._sending.add(record_id)
         try:
-            return await self._submit(request, task=task, record_id=record_id)
+            return await self._submit(
+                request, task=task, record_id=record_id, user_id=user_id, endpoints=endpoints
+            )
         finally:
             if record_id is not None:
                 self._sending.discard(record_id)
@@ -177,33 +181,24 @@ class SimulationTracker:
         *,
         task: str = "manual",
         record_id: int | None = None,
+        user_id: str | None = None,
+        endpoints: BrainEndpoints | None = None,
     ) -> SimulationRecord:
-        """Start one simulation, recording its id durably.
-
-        Ordering is deliberate and must not be rearranged:
-
-        1. commit a ``PENDING`` row describing what we are about to ask for;
-        2. issue the POST;
-        3. commit the platform id from ``Location`` and flip to ``RUNNING``.
-
-        A failure at step 2 marks the row ``REJECTED``. A crash between 2 and 3 leaves
-        it ``PENDING``, which :meth:`reconcile` reports.
-
-        ``record_id`` adopts a row the batch engine already queued, so a queued
-        simulation keeps its identity instead of being duplicated on submission.
-        """
         payload = request.to_wire()
         settings = request.settings
-        #: Adopted from the queue, so a transient failure can hand it back there.
         adopted = record_id is not None
+        target_endpoints = endpoints or self.endpoints
 
         # --- 1. persist intent before touching the network ---------------
         async with self.db.session() as session:
             if record_id is not None:
+                values: dict[str, Any] = {"status": SimStatus.PENDING}
+                if user_id:
+                    values["user_id"] = user_id
                 await session.execute(
                     update(SimulationRecord)
                     .where(SimulationRecord.id == record_id)
-                    .values(status=SimStatus.PENDING)
+                    .values(**values)
                 )
             else:
                 record = SimulationRecord(
@@ -217,18 +212,19 @@ class SimulationTracker:
                     language=settings.language,
                     universe=settings.universe,
                     task=task,
+                    user_id=user_id,
                     status=SimStatus.PENDING,
                 )
                 session.add(record)
                 await session.flush()
                 record_id = record.id
 
-        log.info("sim.pending", record_id=record_id, region=settings.region)
+        log.info("sim.pending", record_id=record_id, region=settings.region, user_id=user_id)
         await self._notify()
 
         # --- 2. the network call ----------------------------------------
         try:
-            response = await self.endpoints.create_simulation(request)
+            response = await target_endpoints.create_simulation(request)
         except BrainValidationError as exc:
             # Pass the platform's own wording through untouched — "TOP9000 is not a
             # valid choice" tells the researcher what to fix; "rejected" does not.
@@ -360,32 +356,37 @@ class SimulationTracker:
         async with self.db.session() as session:
             return await session.get(SimulationRecord, record_id)
 
-    async def active(self) -> list[SimulationRecord]:
+    async def active(self, user_id: str | None = None) -> list[SimulationRecord]:
         """Everything not yet in a terminal state, including work still queued.
 
         The queue is shown alongside what is running: a researcher needs to see the
         backlog, not just the eight slots currently in use.
         """
         async with self.db.session() as session:
-            result = await session.execute(
-                select(SimulationRecord)
-                .where(
-                    SimulationRecord.status.in_(
-                        [SimStatus.QUEUED, SimStatus.PENDING, SimStatus.RUNNING]
-                    )
+            stmt = select(SimulationRecord).where(
+                SimulationRecord.status.in_(
+                    [SimStatus.QUEUED, SimStatus.PENDING, SimStatus.RUNNING]
                 )
-                .order_by(SimulationRecord.created_at)
             )
+            if user_id:
+                stmt = stmt.where(SimulationRecord.user_id == user_id)
+            stmt = stmt.order_by(SimulationRecord.created_at)
+            result = await session.execute(stmt)
             return list(result.scalars())
 
-    async def recent(self, limit: int = 100) -> list[SimulationRecord]:
+    async def active_for_user(self, user_id: str | None = None) -> list[SimulationRecord]:
+        return await self.active(user_id=user_id)
+
+    async def recent(self, limit: int = 100, user_id: str | None = None) -> list[SimulationRecord]:
         async with self.db.session() as session:
-            result = await session.execute(
-                select(SimulationRecord).order_by(SimulationRecord.created_at.desc()).limit(limit)
-            )
+            stmt = select(SimulationRecord)
+            if user_id:
+                stmt = stmt.where(SimulationRecord.user_id == user_id)
+            stmt = stmt.order_by(SimulationRecord.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
             return list(result.scalars())
 
-    async def used_today(self) -> int:
+    async def used_today(self, user_id: str | None = None) -> int:
         """Simulations consumed since the platform's day began.
 
         Counted locally because nothing exposes the real figure until a simulation POST
@@ -401,7 +402,7 @@ class SimulationTracker:
 
         start = datetime.now(PLATFORM_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
         async with self.db.session() as session:
-            total = await session.scalar(
+            stmt = (
                 select(func.count())
                 .select_from(SimulationRecord)
                 .where(
@@ -409,9 +410,12 @@ class SimulationTracker:
                     SimulationRecord.submitted_at >= start.astimezone(UTC),
                 )
             )
+            if user_id:
+                stmt = stmt.where(SimulationRecord.user_id == user_id)
+            total = await session.scalar(stmt)
         return int(total or 0)
 
-    async def uncharged_since(self, moment: datetime) -> int:
+    async def uncharged_since(self, moment: datetime, user_id: str | None = None) -> int:
         """Simulations sent today that a quota reading taken at ``moment`` may not count.
 
         BRAIN's ``X-Ratelimit-Remaining`` lags what was sent: eight batches posted within
@@ -430,7 +434,7 @@ class SimulationTracker:
         start = datetime.now(PLATFORM_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
         moment = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
         async with self.db.session() as session:
-            total = await session.scalar(
+            stmt = (
                 select(func.count())
                 .select_from(SimulationRecord)
                 .where(

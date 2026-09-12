@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..templates.library import TemplateNotFoundError, serialise
-from .deps import State
+from .deps import OptionalUser, State, User
 
 router = APIRouter(prefix="/api/templates", tags=["templates"])
 
@@ -43,10 +43,12 @@ class RunBody(BaseModel):
 @router.get("")
 async def list_templates(
     state: State,
+    user: OptionalUser,
     tag: str | None = None,
     origin: str | None = None,
 ) -> list[dict[str, Any]]:
-    rows = await state.templates.list(tag=tag, origin=origin)
+    user_id = user.user_id if user else None
+    rows = await state.templates.list(tag=tag, origin=origin, user_id=user_id)
     return [serialise(r, include_source=False) for r in rows]
 
 

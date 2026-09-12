@@ -13,7 +13,7 @@ import { toast } from 'sonner'
 import { auth } from '@/api/core'
 import { errorMessage, http } from '@/api/http'
 import type { Today } from '@/api/types'
-import { useRefetchOn } from '@/lib/ws'
+import { telemetry, useRefetchOn } from '@/lib/ws'
 import { cx } from '@/ui/kit'
 import { Menu } from '@/ui/overlay'
 import { NAV } from './nav'
@@ -49,7 +49,13 @@ export function Sidebar({ you, collapsed }: { you: Today['you']; collapsed: bool
 
   const signOut = useMutation({
     mutationFn: () => auth.logout(),
-    onSuccess: () => queryClient.invalidateQueries(),
+    onSuccess: () => {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('alpha_token')
+      }
+      telemetry.reconnect()
+      void queryClient.invalidateQueries()
+    },
     onError: (error) => toast.error(errorMessage(error)),
   })
 

@@ -38,11 +38,85 @@ from ..templates.library import TemplateNotFoundError
 from ..templates.schema import TemplateError
 
 
+from ..brain.auth import SessionInfo
+from ..brain.endpoints import BrainEndpoints
+from ..security.jwt import verify_access_token
+
+
 def get_state(request: Request) -> AppState:
     return request.app.state.harness
 
 
 State = Annotated[AppState, Depends(get_state)]
+
+
+class UserContext:
+    """Carries the authenticated user identity and user-scoped endpoints."""
+
+    def __init__(
+        self,
+        user_id: str,
+        email: str,
+        session: SessionInfo,
+        endpoints: BrainEndpoints,
+        state: AppState,
+    ) -> None:
+        self.user_id = user_id
+        self.email = email
+        self.session = session
+        self.endpoints = endpoints
+        self.state = state
+
+
+async def get_current_user(request: Request, state: State) -> UserContext:
+    auth_header = request.headers.get("Authorization")
+    token: str | None = None
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.query_params.get("token")
+
+    if not token:
+        # If single local session exists, fallback to it
+        if state.auth.session.authenticated and state.auth.session.user_id:
+            user_id = state.auth.session.user_id
+            email = await state.auth.stored_email(user_id=user_id) or ""
+            return UserContext(
+                user_id=user_id,
+                email=email,
+                session=state.auth.session,
+                endpoints=state.endpoints,
+                state=state,
+            )
+        raise BrainAuthError("Not authenticated")
+
+    try:
+        payload = verify_access_token(token, state.vault.key)
+        user_id = str(payload["sub"])
+        email = str(payload.get("email", ""))
+        session_info, endpoints = await state.auth.get_user_context(user_id)
+        if not session_info.authenticated:
+            raise BrainAuthError("Session expired or invalid")
+        return UserContext(
+            user_id=user_id,
+            email=email,
+            session=session_info,
+            endpoints=endpoints,
+            state=state,
+        )
+    except Exception as exc:
+        raise BrainAuthError("Invalid or expired authentication token") from exc
+
+
+async def get_optional_user(request: Request, state: State) -> UserContext | None:
+    try:
+        return await get_current_user(request, state)
+    except Exception:
+        return None
+
+
+User = Annotated[UserContext, Depends(get_current_user)]
+OptionalUser = Annotated[UserContext | None, Depends(get_optional_user)]
 
 
 class ScopedRequest(BaseModel):

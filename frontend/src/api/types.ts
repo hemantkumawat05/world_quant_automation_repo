@@ -202,6 +202,7 @@ export interface Session {
   detail: string | null
   canMultiSimulate: boolean
   isConsultant: boolean
+  token?: string | null
 }
 
 export interface Today {

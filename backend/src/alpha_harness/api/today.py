@@ -28,10 +28,11 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
+from ..brain.auth import SessionInfo
 from ..brain.filters import PLATFORM_TZ
 from ..db.models import SyncStatus
 from ..llm.budget import seconds_until_reset
-from .deps import State
+from .deps import OptionalUser, State, User
 
 router = APIRouter(prefix="/api/today", tags=["today"])
 
@@ -76,63 +77,71 @@ FEATURES: dict[str, tuple[str, str]] = {
 @router.get("")
 async def today(
     state: State,
+    user: OptionalUser,
     region: str = "USA",
     delay: int = 1,
     universe: str = "TOP3000",
     instrument_type: str = "EQUITY",
 ) -> dict[str, Any]:
     """Everything the first screen needs, in one call."""
-    session = state.auth.session
-    stored_email = await state.auth.stored_email()
-    keys = await state.llm.keys.list()
-    enabled_keys = [k for k in keys if k.enabled]
-
-    # The linear flow. Each step is a thing to do, never a thing to choose between.
-    if not session.authenticated:
-        step = "sign-in"
-    elif not enabled_keys:
-        step = "add-key"
+    if user and user.session.authenticated:
+        session = user.session
+        stored_email = user.email or await state.auth.stored_email(user_id=user.user_id)
+        keys = await state.llm.keys.list(user_id=user.user_id)
+        enabled_keys = [k for k in keys if k.enabled]
+        step = "ready" if enabled_keys else "add-key"
+        user_id = user.user_id
     else:
-        step = "ready"
+        session = SessionInfo.anonymous()
+        stored_email = None
+        keys = []
+        enabled_keys = []
+        step = "sign-in"
+        user_id = None
 
     return {
         "step": step,
-        "you": await _you(state, session, stored_email),
-        "simulations": await _simulations(state),
+        "you": await _you(state, session, stored_email, user_id=user_id),
+        "simulations": await _simulations(state, user_id=user_id),
         "assistant": await _assistant(state, keys, enabled_keys),
         "catalog": await _catalog(state, instrument_type, region, delay, universe),
     }
 
 
 @router.get("/bar")
-async def bar(state: State) -> dict[str, Any]:
-    """The top bar: session time left, simulations left, and the reset countdown.
-
-    Kept apart from ``/api/today`` because it is polled on every screen, and the key and
-    catalog lookups that page needs have no business running every thirty seconds.
-    """
-    session = state.auth.session
-    sims = await _simulations(state)
+async def bar(state: State, user: OptionalUser) -> dict[str, Any]:
+    """The top bar: session time left, simulations left, and the reset countdown."""
+    if user and user.session.authenticated:
+        session = user.session
+        sims = await _simulations(state, user_id=user.user_id)
+        return {
+            "signedIn": True,
+            "fullName": session.full_name or user.email or session.user_id,
+            "expiresInSeconds": session.expires_in_seconds,
+            "simulations": {k: sims[k] for k in ("remaining", "limit", "exact", "queued")},
+            "resetsInSeconds": sims["resetsInSeconds"],
+        }
+    sims = await _simulations(state, user_id=None)
     return {
-        "signedIn": session.authenticated,
-        "fullName": session.full_name,
-        "expiresInSeconds": session.expires_in_seconds,
+        "signedIn": False,
+        "fullName": None,
+        "expiresInSeconds": None,
         "simulations": {k: sims[k] for k in ("remaining", "limit", "exact", "queued")},
         "resetsInSeconds": sims["resetsInSeconds"],
     }
 
 
 @router.get("/activity")
-async def activity(state: State, days: int = Query(default=90, ge=7, le=365)) -> dict[str, Any]:
-    """Simulations sent and alphas submitted per day, from BRAIN's own activity record.
-
-    BRAIN counts these itself, so the chart agrees with the platform even for work sent
-    from outside this application.
-    """
+async def activity(
+    state: State,
+    user: User,
+    days: int = Query(default=90, ge=7, le=365),
+) -> dict[str, Any]:
+    """Simulations sent and alphas submitted per day, from BRAIN's own activity record."""
     end = datetime.now(PLATFORM_TZ).date()
     start = end - timedelta(days=days - 1)
-    simulations = await state.endpoints.activity_counts("simulations", start.isoformat())
-    submissions = await state.endpoints.activity_counts("submissions", start.isoformat())
+    simulations = await user.endpoints.activity_counts("simulations", start.isoformat())
+    submissions = await user.endpoints.activity_counts("submissions", start.isoformat())
     return {"days": daily_activity(simulations, submissions, start, end)}
 
 
@@ -200,14 +209,16 @@ async def _catalog(
     }
 
 
-async def _you(state: State, session: Any, stored_email: str | None) -> dict[str, Any]:
+async def _you(
+    state: State,
+    session: Any,
+    stored_email: str | None,
+    user_id: str | None = None,
+) -> dict[str, Any]:
     granted = list(session.permissions or [])
-    # The auth service resolves and caches the name at sign-in; falling back to the
-    # local part of the email means the greeting still works when the profile is
-    # unavailable, which is better than showing an account id to someone new.
     full_name = session.full_name
-    if not full_name and session.authenticated:
-        await state.auth.get_user_profile()
+    if not full_name and session.authenticated and user_id:
+        await state.auth.get_user_profile(user_id)
         full_name = session.full_name
     if not full_name and stored_email:
         full_name = stored_email.split("@")[0].replace(".", " ").title()
@@ -225,19 +236,16 @@ async def _you(state: State, session: Any, stored_email: str | None) -> dict[str
             }
             for code in granted
         ],
-        # Surfaced separately because it is the one that decides whether a day's work
-        # takes hours or weeks.
         "canRunTenAtOnce": "MULTI_SIMULATION" in granted,
         "verificationUrl": session.verification_url,
     }
 
 
-async def _simulations(state: State) -> dict[str, Any]:
+async def _simulations(state: State, user_id: str | None = None) -> dict[str, Any]:
     allowance = state.settings.daily_simulation_allowance
-    used = await state.tracker.used_today()
+    used = await state.tracker.used_today(user_id=user_id)
     snapshot = await state.tracker.latest_quota()
 
-    # The platform's own figure wins whenever we have one from today.
     exact = False
     pending = 0
     limit, remaining = allowance, max(0, allowance - used)
@@ -246,8 +254,7 @@ async def _simulations(state: State) -> dict[str, Any]:
         if observed and _same_platform_day(observed):
             exact = True
             limit = snapshot.limit_total or allowance
-            # The header lags what was sent, so what it cannot have counted yet comes off.
-            pending = await state.tracker.uncharged_since(observed)
+            pending = await state.tracker.uncharged_since(observed, user_id=user_id)
             remaining = max(0, snapshot.remaining - pending)
 
     resets_in = seconds_until_reset(tz=PLATFORM_TZ)

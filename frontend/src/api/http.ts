@@ -86,11 +86,20 @@ const BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = path.startsWith('http') ? path : `${BASE_URL}${path}`
+  const token = typeof window !== 'undefined' ? localStorage.getItem('alpha_token') : null
+  const headers: Record<string, string> = {}
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   let response: Response
   try {
     response = await fetch(url, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: Object.keys(headers).length ? headers : undefined,
       body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
@@ -98,6 +107,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   if (response.status === 204) return undefined as T
+
+  if (response.status === 401 && typeof window !== 'undefined' && token) {
+    localStorage.removeItem('alpha_token')
+  }
 
   const raw = await response.text()
   let parsed: unknown = raw

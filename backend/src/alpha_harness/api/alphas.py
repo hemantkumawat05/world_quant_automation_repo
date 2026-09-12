@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..brain.filters import OPERATOR_CHOICES, AlphaQuery, Filter, parse
-from .deps import State
+from .deps import User
 
 router = APIRouter(prefix="/api/alphas", tags=["alphas"])
 
@@ -77,7 +77,7 @@ class AlphaListRequest(BaseModel):
 
 
 @router.post("/search")
-async def search(body: AlphaListRequest, state: State) -> dict[str, Any]:
+async def search(body: AlphaListRequest, user: User) -> dict[str, Any]:
     """A filtered page of your alphas.
 
     A POST because the filter list is a body rather than a flat query string — the DSL
@@ -85,64 +85,64 @@ async def search(body: AlphaListRequest, state: State) -> dict[str, Any]:
     round-tripped through an ordinary query-parameter parser.
     """
     query = body.to_query()
-    page = await state.endpoints.list_alphas(query)
+    page = await user.endpoints.list_alphas(query)
     return {**page, "query": query.query()}
 
 
 @router.get("/summary")
-async def summary(state: State) -> dict[str, Any]:
+async def summary(user: User) -> dict[str, Any]:
     """Counts by stage and status — the shape of your pool at a glance."""
-    return await state.endpoints.alphas_summary()
+    return await user.endpoints.alphas_summary()
 
 
 @router.get("/filters")
-async def filter_schema(state: State) -> dict[str, Any]:
+async def filter_schema(user: User) -> dict[str, Any]:
     """Which fields can be filtered and ordered, from the platform itself.
 
     Read rather than hardcoded, for the same reason as the simulation settings: a stale
     copy silently drops filters the platform has since added.
     """
-    schema = await state.endpoints.alpha_filter_schema()
+    schema = await user.endpoints.alpha_filter_schema()
     return {"schema": schema, "operators": list(OPERATOR_CHOICES)}
 
 
 @router.get("/tags")
-async def tags(state: State) -> list[dict[str, Any]]:
-    return await state.endpoints.list_tags()
+async def tags(user: User) -> list[dict[str, Any]]:
+    return await user.endpoints.list_tags()
 
 
 @router.get("/tags/{tag_id}/correlations")
-async def tag_correlations(tag_id: str, state: State) -> dict[str, Any]:
+async def tag_correlations(tag_id: str, user: User) -> dict[str, Any]:
     """How correlated the alphas in one tag are with each other.
 
     Rate limited by the platform per hour. Call it deliberately.
     """
-    return await state.endpoints.tag_correlations(tag_id)
+    return await user.endpoints.tag_correlations(tag_id)
 
 
 @router.get("/{alpha_id}")
-async def get_alpha(alpha_id: str, state: State) -> dict[str, Any]:
+async def get_alpha(alpha_id: str, user: User) -> dict[str, Any]:
     """Full alpha: settings, in-sample and out-of-sample statistics, and the checks."""
-    alpha = await state.endpoints.get_alpha(alpha_id)
+    alpha = await user.endpoints.get_alpha(alpha_id)
     return alpha.model_dump(by_alias=True)
 
 
 @router.get("/{alpha_id}/recordsets")
-async def list_recordsets(alpha_id: str, state: State) -> list[dict[str, Any]]:
+async def list_recordsets(alpha_id: str, user: User) -> list[dict[str, Any]]:
     """Which time series this alpha has — pnl, sharpe, turnover, breakdowns."""
-    refs = await state.endpoints.list_recordsets(alpha_id)
+    refs = await user.endpoints.list_recordsets(alpha_id)
     return [r.model_dump(by_alias=True) for r in refs]
 
 
 @router.get("/{alpha_id}/recordsets/{name}")
-async def get_recordset(alpha_id: str, name: str, state: State) -> dict[str, Any]:
+async def get_recordset(alpha_id: str, name: str, user: User) -> dict[str, Any]:
     """One time series, already zipped into rows.
 
     BRAIN returns these column-oriented (a schema plus positional arrays); the rows are
     assembled here so the frontend never has to. ``columnTypes`` carries the declared
     type per column — note ``permyriad`` means basis points, i.e. divided by 10,000.
     """
-    recordset = await state.endpoints.get_recordset(alpha_id, name)
+    recordset = await user.endpoints.get_recordset(alpha_id, name)
     return {
         "name": recordset.schema_.name or name,
         "title": recordset.schema_.title,
@@ -153,22 +153,22 @@ async def get_recordset(alpha_id: str, name: str, state: State) -> dict[str, Any
 
 
 @router.get("/{alpha_id}/check")
-async def check_alpha(alpha_id: str, state: State) -> dict[str, Any]:
+async def check_alpha(alpha_id: str, user: User) -> dict[str, Any]:
     """Re-run the submission checks without submitting.
 
     The whole point of this endpoint: it tells you whether an alpha *would* pass, and
     changes nothing on the platform. It does update the local copy, so an alpha that has
     just resolved appears on the submit screen without waiting for the next backfill.
     """
-    body = await state.endpoints.check_alpha(alpha_id)
+    body = await user.endpoints.check_alpha(alpha_id)
     checks = ((body.get("is") or {}).get("checks")) or []
     if checks:
-        await state.alphas.save_checks(alpha_id, checks)
+        await user.state.alphas.save_checks(alpha_id, checks)
     return body
 
 
 @router.get("/{alpha_id}/correlations/{kind}")
-async def correlations(alpha_id: str, kind: str, state: State) -> dict[str, Any]:
+async def correlations(alpha_id: str, kind: str, user: User) -> dict[str, Any]:
     """Correlation against your own submitted alphas (``self``) or production (``prod``).
 
     Throttled by the platform per hour, on its own budget separate from simulations, so
@@ -176,13 +176,13 @@ async def correlations(alpha_id: str, kind: str, state: State) -> dict[str, Any]
     """
     if kind not in ("self", "prod"):
         raise HTTPException(400, "kind must be 'self' or 'prod'")
-    return await state.endpoints.correlations(alpha_id, kind)
+    return await user.endpoints.correlations(alpha_id, kind)
 
 
 @router.get("/{alpha_id}/similar")
-async def similar(alpha_id: str, state: State, limit: int = Query(5, ge=1, le=50)) -> Any:
+async def similar(alpha_id: str, user: User, limit: int = Query(5, ge=1, le=50)) -> Any:
     """Alphas the platform considers related. Useful for spotting crowding."""
-    return await state.endpoints.similar_alphas(alpha_id, limit)
+    return await user.endpoints.similar_alphas(alpha_id, limit)
 
 
 class AlphaEdit(BaseModel):
@@ -205,12 +205,12 @@ class AlphaEdit(BaseModel):
 
 
 @router.patch("/{alpha_id}")
-async def edit_alpha(alpha_id: str, body: AlphaEdit, state: State) -> dict[str, Any]:
+async def edit_alpha(alpha_id: str, body: AlphaEdit, user: User) -> dict[str, Any]:
     changes = body.changes()
     if not changes:
         raise HTTPException(
             422,
             detail={"code": "nothing_to_change", "message": "No fields were given to change."},
         )
-    alpha = await state.endpoints.patch_alpha(alpha_id, changes)
+    alpha = await user.endpoints.patch_alpha(alpha_id, changes)
     return alpha.model_dump(by_alias=True)

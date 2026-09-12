@@ -1,23 +1,24 @@
 """Credential storage and session lifecycle.
 
 Ties three things together: the vault (sealing secrets), SQLite (persisting them), and
-the BRAIN authenticator (using them).
-
-The session cookie jar is persisted deliberately. Signing in costs a proof-of-work solve
-and counts against a lockout budget, so a backend restart must not trigger a new one.
+the BRAIN authenticator (using them). Supports multi-tenant session pools and JWT generation.
 """
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from sqlalchemy import select
 
 from ..brain.auth import Authenticator, SessionInfo
+from ..brain.client import BrainClient
 from ..brain.endpoints import BrainEndpoints
 from ..db.models import BrainSessionRow, Credential, MetadataCache, utcnow
 from ..db.sqlite import Database
+from ..security.jwt import create_access_token
 from ..security.vault import Vault
 
 log = structlog.get_logger(__name__)
@@ -48,21 +49,43 @@ class AuthService:
         self._session = SessionInfo.anonymous()
         self._user_profile: dict[str, Any] | None = None
 
+        # Multi-user session and endpoint caches
+        self._user_sessions: dict[str, SessionInfo] = {}
+        self._user_endpoints: dict[str, BrainEndpoints] = {}
+        self._user_profiles: dict[str, dict[str, Any]] = {}
+
+    def _create_endpoints(self, cookies: list[dict[str, Any]] | None = None) -> BrainEndpoints:
+        client = BrainClient(
+            self.endpoints.client.base_url,
+            min_retry_after=self.endpoints.client.throttle.min_retry_after,
+            poll_timeout=self.endpoints.client.poll_timeout,
+            min_request_interval=self.endpoints.client.throttle.min_interval,
+            default_attempts=self.endpoints.client.default_attempts,
+        )
+        if cookies:
+            client.load_cookies(cookies)
+        return BrainEndpoints(client)
+
     @property
     def session(self) -> SessionInfo:
-        """Last known session state. Cheap; does not hit the network."""
+        """Last known global session state (for backwards compatibility)."""
         return self._session
 
-    async def get_user_profile(self) -> dict[str, Any]:
+    async def get_user_profile(self, user_id: str | None = None) -> dict[str, Any]:
         """Cached user profile from BRAIN /users/{userId}."""
-        if not self._session.authenticated or not self._session.user_id:
-            return {}
-        if self._user_profile is not None:
-            return self._user_profile
+        if not user_id:
+            if not self._session.authenticated or not self._session.user_id:
+                return {}
+            user_id = self._session.user_id
+
+        if user_id in self._user_profiles:
+            return self._user_profiles[user_id]
+
+        endpoints = self._user_endpoints.get(user_id, self.endpoints)
         try:
-            profile = await self.endpoints.get_user(self._session.user_id)
+            profile = await endpoints.get_user(user_id)
             if profile:
-                self._user_profile = profile
+                self._user_profiles[user_id] = profile
                 first = str(profile.get("firstName") or "").strip()
                 last = str(profile.get("lastName") or "").strip()
                 full_name = (
@@ -70,16 +93,51 @@ class AuthService:
                     or profile.get("name")
                     or (f"{first} {last}".strip() or None)
                 )
-                if full_name:
+                if user_id in self._user_sessions and full_name:
+                    self._user_sessions[user_id].full_name = full_name
+                if self._session.user_id == user_id and full_name:
                     self._session.full_name = full_name
             return profile
         except Exception as exc:
-            log.warning("brain.user_profile.failed", error=str(exc))
+            log.warning("brain.user_profile.failed", user_id=user_id, error=str(exc))
             return {}
+
+    async def get_user_context(self, user_id: str) -> tuple[SessionInfo, BrainEndpoints]:
+        """Retrieve or restore session and endpoints for a specific user."""
+        if user_id in self._user_sessions and user_id in self._user_endpoints:
+            return self._user_sessions[user_id], self._user_endpoints[user_id]
+
+        # Try to restore from database
+        cookies = await self._load_cookies(user_id=user_id)
+        if cookies:
+            endpoints = self._create_endpoints(cookies)
+            authenticator = Authenticator(endpoints)
+            restored = await authenticator.restore(cookies)
+            if restored and restored.authenticated:
+                self._user_sessions[user_id] = restored
+                self._user_endpoints[user_id] = endpoints
+                await self.get_user_profile(user_id)
+                return restored, endpoints
+
+        # Try re-login with stored credentials if available
+        cred = await self.get_credential(user_id=user_id)
+        if cred:
+            email, password = cred
+            endpoints = self._create_endpoints()
+            authenticator = Authenticator(endpoints)
+            info = await authenticator.login(email, password)
+            if info and info.authenticated:
+                self._user_sessions[user_id] = info
+                self._user_endpoints[user_id] = endpoints
+                await self._save_cookies(info, endpoints=endpoints, user_id=user_id)
+                await self.get_user_profile(user_id)
+                return info, endpoints
+
+        return SessionInfo.anonymous(), self.endpoints
 
     # -- credential storage ----------------------------------------------
 
-    async def store_credential(self, email: str, password: str) -> None:
+    async def store_credential(self, email: str, password: str, user_id: str | None = None) -> None:
         """Save (or replace) the BRAIN login, sealed at rest."""
         sealed = self.vault.seal(password, context=PASSWORD_CONTEXT)
         async with self.db.session() as session:
@@ -90,182 +148,244 @@ class AuthService:
             )
             if existing is not None:
                 existing.password_sealed = sealed
+                if user_id:
+                    existing.user_id = user_id
             else:
-                session.add(Credential(email=email, password_sealed=sealed))
-        log.info("credential.stored", email=_mask(email))
+                session.add(Credential(email=email, password_sealed=sealed, user_id=user_id))
+        log.info("credential.stored", email=_mask(email), user_id=user_id)
 
-    async def get_credential(self) -> tuple[str, str] | None:
+    async def get_credential(self, user_id: str | None = None) -> tuple[str, str] | None:
         """Return the stored ``(email, password)``, unsealed."""
         async with self.db.session() as session:
-            credential = await _current_credential(session)
+            if user_id:
+                query = select(Credential).where(Credential.user_id == user_id)
+            else:
+                query = select(Credential).order_by(
+                    Credential.last_login_at.desc().nulls_last(), Credential.id.desc()
+                )
+            credential = (await session.execute(query.limit(1))).scalars().first()
             if credential is None:
                 return None
             password = self.vault.open(credential.password_sealed, context=PASSWORD_CONTEXT)
             return credential.email, password
 
-    async def stored_email(self) -> str | None:
+    async def stored_email(self, user_id: str | None = None) -> str | None:
         async with self.db.session() as session:
-            credential = await _current_credential(session)
+            if user_id:
+                query = select(Credential).where(Credential.user_id == user_id)
+            else:
+                query = select(Credential).order_by(
+                    Credential.last_login_at.desc().nulls_last(), Credential.id.desc()
+                )
+            credential = (await session.execute(query.limit(1))).scalars().first()
             return credential.email if credential else None
 
-    async def forget(self) -> None:
+    async def forget(self, user_id: str | None = None) -> None:
         """Remove the credential and any cached session."""
         async with self.db.session() as session:
-            for credential in (await session.execute(select(Credential))).scalars():
-                await session.delete(credential)
-        self.endpoints.client.clear_cookies()
-        self._session = SessionInfo.anonymous()
+            if user_id:
+                for cred in (
+                    await session.execute(select(Credential).where(Credential.user_id == user_id))
+                ).scalars():
+                    await session.delete(cred)
+            else:
+                for cred in (await session.execute(select(Credential))).scalars():
+                    await session.delete(cred)
+        if user_id:
+            self._user_sessions.pop(user_id, None)
+            self._user_endpoints.pop(user_id, None)
+            self._user_profiles.pop(user_id, None)
+            await self._clear_cookies(user_id=user_id)
+        else:
+            self.endpoints.client.clear_cookies()
+            self._session = SessionInfo.anonymous()
+            self._user_sessions.clear()
+            self._user_endpoints.clear()
+            self._user_profiles.clear()
+            await self._clear_cookies()
 
     # -- session ---------------------------------------------------------
 
-    async def restore(self) -> SessionInfo:
-        """Reuse a cached cookie jar if it is still valid. Called at startup."""
-        cookies = await self._load_cookies()
-        restored = await self.auth.restore(cookies)
+    async def restore(self, user_id: str | None = None) -> SessionInfo:
+        """Reuse a cached cookie jar if it is still valid."""
+        cookies = await self._load_cookies(user_id=user_id)
+        if not cookies:
+            return SessionInfo.anonymous()
+
+        endpoints = self._create_endpoints(cookies)
+        authenticator = Authenticator(endpoints)
+        restored = await authenticator.restore(cookies)
+
         if restored is None or not restored.authenticated:
-            # Unauthenticated but restorable (identity verification pending) keeps its
-            # verification link; its cookies are left where they are.
-            self._session = restored or SessionInfo.anonymous()
-            return self._session
+            session_info = restored or SessionInfo.anonymous()
+            if user_id:
+                self._user_sessions[user_id] = session_info
+            else:
+                self._session = session_info
+            return session_info
+
+        actual_user_id = restored.user_id or user_id or "default"
+        self._user_sessions[actual_user_id] = restored
+        self._user_endpoints[actual_user_id] = endpoints
         self._session = restored
-        await self._save_cookies(restored)
-        await self._warm_operators()
+
+        await self._save_cookies(restored, endpoints=endpoints, user_id=actual_user_id)
+        await self._warm_operators(endpoints=endpoints)
         return restored
 
-    async def login(self, email: str | None = None, password: str | None = None) -> SessionInfo:
-        """Sign in, storing the credential if it was supplied here and accepted."""
+    async def login(
+        self, email: str | None = None, password: str | None = None
+    ) -> tuple[SessionInfo, str | None]:
+        """Sign in, storing the credential and generating an access token."""
         supplied = bool(email and password)
         if not supplied:
             credential = await self.get_credential()
             if credential is None:
                 raise NoCredentialError(
-                    "No BRAIN credentials stored. Sign in with your BRAIN email and "
-                    "password; they are sealed on this machine and never leave it."
+                    "No BRAIN credentials stored. Sign in with your BRAIN email and password."
                 )
             email, password = credential
         assert email is not None and password is not None
 
-        self._user_profile = None
-        # A pending verification is finished on its own inquiry, never by a new sign-in.
+        endpoints = self._create_endpoints()
+        authenticator = Authenticator(endpoints)
+
         pending = self._session.verification_url
-        info = await self.auth.verify(pending, email, password) if pending else None
+        info = await authenticator.verify(pending, email, password) if pending else None
         if info is None:
-            info = await self.auth.login(email, password)
-        self._session = info
-        if info.authenticated:
-            # Stored only once BRAIN accepts it: a mistyped password must not become the
-            # credential that silent re-login keeps retrying.
+            info = await authenticator.login(email, password)
+
+        token: str | None = None
+        if info.authenticated and info.user_id:
+            token = create_access_token(user_id=info.user_id, email=email, key=self.vault.key)
+            self._user_sessions[info.user_id] = info
+            self._user_endpoints[info.user_id] = endpoints
+            self._session = info
+
             if supplied:
-                await self.store_credential(email, password)
-            await self._touch_last_login(email)
-            await self._save_cookies(info)
-            await self._touch_last_login(email)
-            # Warm the profile so the first screen can greet them by name without a
-            # second round trip. Failure is swallowed inside; a missing name is a
-            # cosmetic loss, never a reason to fail a successful sign-in.
-            await self.get_user_profile()
-            await self._warm_operators()
+                await self.store_credential(email, password, user_id=info.user_id)
+            await self._touch_last_login(email, user_id=info.user_id)
+            await self._save_cookies(info, endpoints=endpoints, user_id=info.user_id)
+            await self.get_user_profile(info.user_id)
+            await self._warm_operators(endpoints=endpoints)
+
+        return info, token
+
+    async def status(self, user_id: str | None = None, *, refresh: bool = False) -> SessionInfo:
+        """Current state for a specific user."""
+        if not user_id:
+            return self._session
+
+        if not refresh and user_id in self._user_sessions:
+            return self._user_sessions[user_id]
+
+        info, _ = await self.get_user_context(user_id)
+        if refresh and info.authenticated and user_id in self._user_endpoints:
+            fresh = await Authenticator(self._user_endpoints[user_id]).status()
+            if fresh.authenticated and not fresh.full_name and info.full_name:
+                fresh.full_name = info.full_name
+            self._user_sessions[user_id] = fresh
+            info = fresh
         return info
 
-    async def ensure(self) -> SessionInfo:
-        """Restore if possible, sign in only if needed."""
-        if self._session.authenticated:
-            return self._session
-        restored = await self.restore()
-        if restored.authenticated:
-            return restored
-        return await self.login()
-
-    async def status(self, *, refresh: bool = False) -> SessionInfo:
-        """Current state. ``refresh`` re-validates against the platform."""
-        if not refresh:
-            return self._session
-        fresh = await self.auth.status()
-        # The profile is cached, so re-reading it returns early and would not set the
-        # name again on the new object.
-        if fresh.authenticated and not fresh.full_name:
-            fresh.full_name = self._session.full_name
-        self._session = fresh
-        if self._session.authenticated:
-            await self.get_user_profile()
-        return self._session
-
-    async def logout(self) -> None:
-        self._user_profile = None
-        await self.auth.logout()
-        await self._clear_cookies()
-        self._session = SessionInfo.anonymous()
+    async def logout(self, user_id: str | None = None) -> None:
+        if user_id:
+            endpoints = self._user_endpoints.get(user_id)
+            if endpoints:
+                with contextlib.suppress(Exception):
+                    await Authenticator(endpoints).logout()
+            self._user_sessions.pop(user_id, None)
+            self._user_endpoints.pop(user_id, None)
+            self._user_profiles.pop(user_id, None)
+            await self._clear_cookies(user_id=user_id)
+        else:
+            self._user_profile = None
+            await self.auth.logout()
+            await self._clear_cookies()
+            self._session = SessionInfo.anonymous()
 
     # -- cookie persistence ----------------------------------------------
 
-    async def _load_cookies(self) -> list[dict[str, Any]] | None:
-        import json
-
+    async def _load_cookies(self, user_id: str | None = None) -> list[dict[str, Any]] | None:
         async with self.db.session() as session:
-            row = (
-                (
-                    await session.execute(
-                        select(BrainSessionRow).order_by(BrainSessionRow.updated_at.desc()).limit(1)
-                    )
-                )
-                .scalars()
-                .first()
-            )
+            query = select(BrainSessionRow)
+            if user_id:
+                query = query.where(BrainSessionRow.user_id == user_id)
+            query = query.order_by(BrainSessionRow.updated_at.desc()).limit(1)
+
+            row = (await session.execute(query)).scalars().first()
             if row is None:
                 return None
             try:
                 return json.loads(self.vault.open(row.cookies_sealed, context=COOKIE_CONTEXT))
             except Exception:
-                log.warning("session.cookies_unreadable")
+                log.warning("session.cookies_unreadable", user_id=user_id)
                 return None
 
-    async def _save_cookies(self, info: SessionInfo) -> None:
-        import json
-        from datetime import UTC, datetime
-
-        cookies = self.endpoints.client.export_cookies()
+    async def _save_cookies(
+        self,
+        info: SessionInfo,
+        endpoints: BrainEndpoints | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        client = endpoints.client if endpoints else self.endpoints.client
+        cookies = client.export_cookies()
         if not cookies:
             return
         sealed = self.vault.seal(json.dumps(cookies), context=COOKIE_CONTEXT)
         expires = datetime.fromtimestamp(info.expires_at, tz=UTC) if info.expires_at else None
+        target_user = user_id or info.user_id
 
         async with self.db.session() as session:
-            credential = await _current_credential(session)
-            if credential is None:
-                return
-            row = (
-                (
-                    await session.execute(
-                        select(BrainSessionRow).where(
-                            BrainSessionRow.credential_id == credential.id
+            row = None
+            if target_user:
+                row = (
+                    (
+                        await session.execute(
+                            select(BrainSessionRow).where(BrainSessionRow.user_id == target_user)
                         )
                     )
+                    .scalars()
+                    .first()
                 )
-                .scalars()
-                .first()
-            )
             if row is None:
+                # Find credential id
+                cred = None
+                if target_user:
+                    cred = (
+                        (
+                            await session.execute(
+                                select(Credential).where(Credential.user_id == target_user)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                cred_id = cred.id if cred else 1
                 session.add(
                     BrainSessionRow(
-                        credential_id=credential.id,
+                        credential_id=cred_id,
                         cookies_sealed=sealed,
-                        user_id=info.user_id,
+                        user_id=target_user,
                         permissions=info.permissions,
                         expires_at=expires,
                     )
                 )
             else:
                 row.cookies_sealed = sealed
-                row.user_id = info.user_id
+                row.user_id = target_user
                 row.permissions = info.permissions
                 row.expires_at = expires
 
-    async def _clear_cookies(self) -> None:
+    async def _clear_cookies(self, user_id: str | None = None) -> None:
         async with self.db.session() as session:
-            for row in (await session.execute(select(BrainSessionRow))).scalars():
+            query = select(BrainSessionRow)
+            if user_id:
+                query = query.where(BrainSessionRow.user_id == user_id)
+            for row in (await session.execute(query)).scalars():
                 await session.delete(row)
 
-    async def _touch_last_login(self, email: str) -> None:
+    async def _touch_last_login(self, email: str, user_id: str | None = None) -> None:
         async with self.db.session() as session:
             credential = (
                 (await session.execute(select(Credential).where(Credential.email == email)))
@@ -274,16 +394,12 @@ class AuthService:
             )
             if credential is not None:
                 credential.last_login_at = utcnow()
+                if user_id:
+                    credential.user_id = user_id
 
     # -- platform metadata -----------------------------------------------
 
     async def refresh_metadata(self) -> dict[str, Any]:
-        """Cache ``OPTIONS /simulations``.
-
-        The authoritative region / universe / neutralization values and their
-        interdependencies. Refreshed on login rather than hardcoded, because the set
-        changes as the platform adds markets and as the account's permissions change.
-        """
         schema = await self.endpoints.settings_schema()
         await self._cache("settings_schema", schema)
         return schema
@@ -291,20 +407,16 @@ class AuthService:
     async def cached_settings_schema(self) -> dict[str, Any] | None:
         return await self._read_cache("settings_schema")
 
-    async def refresh_operators(self) -> list[dict[str, Any]]:
-        operators = await self.endpoints.list_operators()
+    async def refresh_operators(self, endpoints: BrainEndpoints | None = None) -> list[dict[str, Any]]:
+        target = endpoints or self.endpoints
+        operators = await target.list_operators()
         payload = [o.model_dump(by_alias=True) for o in operators]
         await self._cache("operators", {"items": payload})
         return payload
 
-    async def _warm_operators(self) -> None:
-        """Cache the account's own operator list once signed in.
-
-        Labs and validation read it, and it was never fetched before. A failure is logged,
-        never raised: signing in must not fail because this list could not be read.
-        """
+    async def _warm_operators(self, endpoints: BrainEndpoints | None = None) -> None:
         try:
-            await self.refresh_operators()
+            await self.refresh_operators(endpoints)
         except Exception:
             log.warning("operators.refresh_failed", exc_info=True)
 
@@ -328,11 +440,6 @@ class AuthService:
 
 
 async def _current_credential(session: Any) -> Credential | None:
-    """The credential in use: the one that signed in most recently.
-
-    Oldest-first meant signing in with a different email stored a second row that
-    silent re-login and the cookie jar never used.
-    """
     return (
         (
             await session.execute(
@@ -347,7 +454,6 @@ async def _current_credential(session: Any) -> Credential | None:
 
 
 def _mask(email: str) -> str:
-    """Never log a full address."""
     name, _, domain = email.partition("@")
     head = name[:2] if len(name) > 2 else name[:1]
     return f"{head}***@{domain}" if domain else f"{head}***"

@@ -53,6 +53,7 @@ class Credential(Base):
     __tablename__ = "credential"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     email: Mapped[str] = mapped_column(String(320), unique=True)
     password_sealed: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -137,6 +138,7 @@ class SimulationRecord(Base):
     __tablename__ = "simulation_record"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
 
     # Platform identity
     platform_id: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -328,7 +330,8 @@ class Template(Base):
     __tablename__ = "template"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(128), unique=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text)
     parsed: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -391,7 +394,8 @@ class Study(Base):
     __tablename__ = "study"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(128), unique=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    name: Mapped[str] = mapped_column(String(128))
     template_id: Mapped[int | None] = mapped_column(ForeignKey("template.id", ondelete="SET NULL"))
     template_name: Mapped[str | None] = mapped_column(String(128))
     template_source: Mapped[str] = mapped_column(Text)
@@ -481,6 +485,7 @@ class ChatThread(Base):
     __tablename__ = "chat_thread"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String(160))
     instrument_type: Mapped[str] = mapped_column(String(16), default="EQUITY")
     region: Mapped[str] = mapped_column(String(16))
@@ -533,6 +538,7 @@ class PlanTrack(Base):
     __table_args__ = (UniqueConstraint("day", "task", name="uq_plan_track_day_task"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     #: US-Eastern date, because that is the clock the simulation allowance resets on.
     day: Mapped[str] = mapped_column(String(10), index=True)
     #: The engine task name. Slot quotas are keyed by this.
@@ -563,6 +569,7 @@ class ApiKey(Base):
     __tablename__ = "api_key"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     label: Mapped[str] = mapped_column(String(64))
     provider: Mapped[str] = mapped_column(String(32), default="google", server_default="google")
     key_sealed: Mapped[bytes] = mapped_column(LargeBinary)

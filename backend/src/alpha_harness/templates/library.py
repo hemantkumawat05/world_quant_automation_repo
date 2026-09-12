@@ -67,11 +67,27 @@ class TemplateLibrary:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    async def list(self, *, tag: str | None = None, origin: str | None = None) -> list[Template]:
+    async def list(
+        self,
+        *,
+        tag: str | None = None,
+        origin: str | None = None,
+        user_id: str | None = None,
+    ) -> list[Template]:
+        from sqlalchemy import or_
+
         async with self.db.session() as session:
             statement = select(Template).order_by(Template.updated_at.desc())
             if origin:
                 statement = statement.where(Template.origin == origin)
+            if user_id:
+                statement = statement.where(
+                    or_(
+                        Template.user_id == user_id,
+                        Template.user_id.is_(None),
+                        Template.origin == "starter",
+                    )
+                )
             rows = list((await session.scalars(statement)).all())
         if tag:
             rows = [r for r in rows if tag in (r.tags or [])]
@@ -91,15 +107,14 @@ class TemplateLibrary:
         *,
         origin: str = "human",
         tags: list[str] | None = None,
+        user_id: str | None = None,
     ) -> Template:
-        """Parse, then store. An unparseable template is never written.
-
-        The name comes from the document itself, so the YAML stays the single source of
-        truth rather than drifting from a separate database column.
-        """
         spec = parse(source)
         async with self.db.session() as session:
-            existing = await session.scalar(select(Template).where(Template.name == spec.name))
+            query = select(Template).where(Template.name == spec.name)
+            if user_id:
+                query = query.where(Template.user_id == user_id)
+            existing = await session.scalar(query)
             if existing is not None:
                 raise DuplicateTemplateNameError(spec.name)
             row = Template(
@@ -109,11 +124,12 @@ class TemplateLibrary:
                 parsed=spec.model_dump(mode="json", exclude_none=True),
                 origin=origin,
                 tags=list(tags or []),
+                user_id=user_id,
             )
             session.add(row)
             await session.commit()
             await session.refresh(row)
-        log.info("template.created", name=spec.name, origin=origin)
+        log.info("template.created", name=spec.name, origin=origin, user_id=user_id)
         return row
 
     async def spec(self, template_id: int) -> TemplateSpec:

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from ..brain.schemas import SimulationRequest, SimulationSettings
 from ..brain.settings_schema import validate_settings
 from ..engine.tracker import serialise
-from .deps import State
+from .deps import OptionalUser, State, User
 
 router = APIRouter(prefix="/api", tags=["simulations"])
 
@@ -26,16 +26,8 @@ class SubmitRequest(BaseModel):
 
 
 @router.post("/simulations")
-async def submit(payload: SubmitRequest, state: State) -> dict[str, Any]:
-    """Submit a simulation and begin tracking it.
-
-    The id is recorded before the request is sent and updated the instant BRAIN returns
-    it, so the simulation can always be cancelled.
-
-    Settings are checked against the cached schema first. A combination the platform
-    would reject — say ``CHN`` with ``TOP3000`` — is caught here rather than costing a
-    round trip, because the daily quota is the binding constraint on a day's research.
-    """
+async def submit(payload: SubmitRequest, state: State, user: User) -> dict[str, Any]:
+    """Submit a simulation and begin tracking it."""
     if state.engine.daily_limit_hit:
         raise HTTPException(
             429,
@@ -64,7 +56,12 @@ async def submit(payload: SubmitRequest, state: State) -> dict[str, Any]:
         settings=payload.settings,
         regular=payload.expression,
     )
-    record = await state.tracker.submit(request, task=payload.task)
+    record = await state.tracker.submit(
+        request,
+        task=payload.task,
+        user_id=user.user_id,
+        endpoints=user.endpoints,
+    )
     return serialise(record)
 
 
@@ -159,14 +156,20 @@ async def set_quota(payload: QuotaRequest, state: State) -> dict[str, Any]:
 
 
 @router.get("/simulations/active")
-async def active(state: State) -> list[dict[str, Any]]:
+async def active(state: State, user: OptionalUser) -> list[dict[str, Any]]:
     """Everything currently pending or running — what the matrix renders."""
-    return [serialise(r) for r in await state.tracker.active()]
+    user_id = user.user_id if user else None
+    return [serialise(r) for r in await state.tracker.active(user_id=user_id)]
 
 
 @router.get("/simulations/recent")
-async def recent(state: State, limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
-    return [serialise(r) for r in await state.tracker.recent(limit)]
+async def recent(
+    state: State,
+    user: OptionalUser,
+    limit: int = Query(100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    user_id = user.user_id if user else None
+    return [serialise(r) for r in await state.tracker.recent(limit, user_id=user_id)]
 
 
 @router.get("/simulations/quota")

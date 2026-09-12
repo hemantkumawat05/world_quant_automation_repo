@@ -123,29 +123,40 @@ class KeyStore:
         print_ = fingerprint(clean)
 
         async with self.db.session() as session:
-            existing = await session.scalar(select(ApiKey).where(ApiKey.fingerprint == print_))
+            query = select(ApiKey).where(ApiKey.fingerprint == print_)
+            if user_id:
+                query = query.where(ApiKey.user_id == user_id)
+            existing = await session.scalar(query)
             if existing is not None:
                 raise LLMError(
                     f"That key is already stored as {existing.label!r}. Adding it twice "
                     "would not increase your quota — quota is per account."
                 )
-            count = len(list((await session.scalars(select(ApiKey.id))).all()))
+            count_query = select(ApiKey.id)
+            if user_id:
+                count_query = count_query.where(ApiKey.user_id == user_id)
+            count = len(list((await session.scalars(count_query)).all()))
             row = ApiKey(
                 label=label or f"Key {count + 1}",
                 provider=provider,
                 key_sealed=self.vault.seal(clean, context=KEY_CONTEXT),
                 hint=hint(clean),
                 fingerprint=print_,
+                user_id=user_id,
             )
             session.add(row)
             await session.commit()
             await session.refresh(row)
-        log.info("llm.key.added", label=row.label, hint=row.hint, provider=provider)
+        log.info("llm.key.added", label=row.label, hint=row.hint, provider=provider, user_id=user_id)
         return row
 
-    async def list(self) -> list[ApiKey]:
+    async def list(self, user_id: str | None = None) -> list[ApiKey]:
         async with self.db.session() as session:
-            return list((await session.scalars(select(ApiKey).order_by(ApiKey.id))).all())
+            query = select(ApiKey)
+            if user_id:
+                query = query.where(ApiKey.user_id == user_id)
+            query = query.order_by(ApiKey.id)
+            return list((await session.scalars(query)).all())
 
     async def get(self, key_id: int) -> ApiKey | None:
         async with self.db.session() as session:
@@ -192,17 +203,19 @@ class KeyStore:
 
     # -- rotation --------------------------------------------------------
 
-    async def choose(self, model: ModelInfo, *, estimated_tokens: int = 4_000) -> int:
-        """The key with the most daily budget left for this model.
-
-        Most-remaining-first rather than round-robin: quota is per account, so the goal
-        is to exhaust one key before touching the next only when they are equal, and
-        otherwise always to use whichever has the most left. Ties break on key id so the
-        choice is reproducible.
-        """
-        # Provider first, budget second. A Groq key cannot answer for a Gemini model, so
-        # offering it would spend a retry to learn something already known.
-        rows = [r for r in await self.list() if r.enabled and r.provider == model.provider]
+    async def choose(
+        self,
+        model: ModelInfo,
+        *,
+        estimated_tokens: int = 4_000,
+        user_id: str | None = None,
+    ) -> int:
+        """The key with the most daily budget left for this model."""
+        rows = [
+            r
+            for r in await self.list(user_id=user_id)
+            if r.enabled and r.provider == model.provider
+        ]
         if not rows:
             raise NoKeysError(model.provider)
 
@@ -219,9 +232,13 @@ class KeyStore:
         best = max(usable, key=lambda s: (s.daily_remaining, -s.key_id))
         return best.key_id
 
-    async def status(self, registry: ModelRegistry) -> dict[str, Any]:
+    async def status(
+        self,
+        registry: ModelRegistry,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Keys, their health, and what budget remains — the whole picture in one call."""
-        rows = await self.list()
+        rows = await self.list(user_id=user_id)
         usage = await self.ledger.usage([r.id for r in rows])
         by_key: dict[int, list[dict[str, Any]]] = {}
         for entry in usage:

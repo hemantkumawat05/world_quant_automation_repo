@@ -7,6 +7,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { auth } from '@/api/core'
 import { ApiError } from '@/api/http'
 import { useLive } from '@/lib/live'
+import { telemetry } from '@/lib/ws'
 import { Button, ErrorNotice, Field, Input } from '@/ui/kit'
 
 /** Larger than the in-app controls: this screen is the whole page and is read from arm's length. */
@@ -33,11 +34,15 @@ export function SignIn({ storedEmail }: { storedEmail: string | null }) {
           verificationUrl: session.verificationUrl ?? undefined,
         })
       }
+      if (session.token && typeof window !== 'undefined') {
+        localStorage.setItem('alpha_token', session.token)
+      }
       return session
     },
     onSuccess: () => {
       setPassword('')
       useLive.setState({ verificationUrl: null })
+      telemetry.reconnect()
       void queryClient.invalidateQueries()
     },
   })

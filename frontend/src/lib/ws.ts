@@ -31,6 +31,17 @@ class Telemetry {
   private delay = RECONNECT_MIN
   private connected = false
 
+  reconnect(): void {
+    if (this.socket) {
+      this.socket.onclose = null
+      this.socket.onerror = null
+      this.socket.close()
+      this.socket = null
+    }
+    this.delay = RECONNECT_MIN
+    this.connect()
+  }
+
   connect(): void {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return
     let wsUrl = import.meta.env.VITE_WS_URL
@@ -50,6 +61,13 @@ class Telemetry {
         wsUrl = `${protocol}//${location.host}/ws`
       }
     }
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('alpha_token') : null
+    if (token) {
+      const separator = wsUrl.includes('?') ? '&' : '?'
+      wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(token)}`
+    }
+
     const socket = new WebSocket(wsUrl)
     this.socket = socket
 
